@@ -1,0 +1,245 @@
+import os
+import cv2
+import mediapipe as mp
+import numpy as np
+from sklearn.model_selection import train_test_split
+from tensorflow.keras.utils import to_categorical
+
+mp_holistic = mp.solutions.holistic
+mp_drawing = mp.solutions.drawing_utils
+
+def mediapipe_detection(image, model):
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    image.flags.writeable = False 
+    results = model.process(image)
+    image.flags.writeable = True 
+    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    return image, results
+    
+def extract_keypoints(results):
+    face = np.array([[res.x, res.y, res.z] for res in results.face_landmarks.landmark]).flatten() if results.face_landmarks else np.zeros(468*3)
+    lh = np.array([[res.x, res.y, res.z] for res in results.left_hand_landmarks.landmark]).flatten() if results.left_hand_landmarks else np.zeros(21*3)
+    rh = np.array([[res.x, res.y, res.z] for res in results.right_hand_landmarks.landmark]).flatten() if results.right_hand_landmarks else np.zeros(21*3)
+    pose = np.array([[res.x, res.y, res.z] for res in results.pose_landmarks.landmark]).flatten() if results.pose_landmarks else np.zeros(23*3)
+    return np.concatenate([face, lh, rh, pose])
+
+def draw_styled_landmarks(image, results): 
+    mp_drawing.draw_landmarks(image, results.face_landmarks, mp_holistic.FACEMESH_TESSELATION, 
+                             mp_drawing.DrawingSpec(color=(80,110,10), thickness=1, circle_radius=1), 
+                             mp_drawing.DrawingSpec(color=(80,256,121), thickness=1, circle_radius=1))  
+    mp_drawing.draw_landmarks(image, results.left_hand_landmarks, mp_holistic.HAND_CONNECTIONS, 
+                             mp_drawing.DrawingSpec(color=(121,22,76), thickness=2, circle_radius=4), 
+                             mp_drawing.DrawingSpec(color=(121,44,250), thickness=2, circle_radius=2))  
+    mp_drawing.draw_landmarks(image, results.right_hand_landmarks, mp_holistic.HAND_CONNECTIONS, 
+                             mp_drawing.DrawingSpec(color=(245,117,66), thickness=2, circle_radius=4), 
+                             mp_drawing.DrawingSpec(color=(245,66,230), thickness=2, circle_radius=2)) 
+    mp_drawing.draw_landmarks(image, results.pose_landmarks, mp_holistic.POSE_CONNECTIONS, 
+                             mp_drawing.DrawingSpec(color=(110,30,75), thickness=2, circle_radius=4), 
+                             mp_drawing.DrawingSpec(color=(160,45,70), thickness=2, circle_radius=2))  
+
+                             //Data Collection//
+
+idn=0
+
+DATA_PATH = os.path.join('dataset pjt') 
+actions = np.array(['Hello','How'])
+no_sequences = idn*20
+sequence_length = 30
+
+for action in actions: 
+    for sequence in range(no_sequences,no_sequences+320):
+        try: 
+            os.makedirs(os.path.join(DATA_PATH, action, str(sequence)))
+        except:
+            pass
+
+ cap = cv2.VideoCapture(0)
+with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5) as holistic:
+
+    for action in actions:
+        for sequence in range(no_sequences,no_sequences+20):
+            
+            for frame_num in range(sequence_length):
+
+                ret, frame = cap.read()
+
+                image, results = mediapipe_detection(frame, holistic)
+
+                draw_styled_landmarks(image, results)
+
+                if frame_num == 0: 
+                    cv2.putText(image, 'Preparing...', (20,50),cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0, 0), 4, cv2.LINE_AA)
+                    cv2.putText(image, 'Collecting frames for {} Video Number {}'.format(action, sequence), (15,12),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+                    cv2.imshow('Output', image)
+                    cv2.waitKey(2000)
+                else: 
+                    cv2.putText(image, 'Collecting frames for {} Video Number {}'.format(action, sequence), (15,12),cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+                    cv2.imshow('Output', image)
+                    
+                keypoints = extract_keypoints(results)
+                npy_path = os.path.join(DATA_PATH, action, str(sequence), str(frame_num))
+                
+                np.save(npy_path, keypoints)
+
+                if cv2.waitKey(10) & 0xFF == ord('q'):
+                    break
+                    
+    cap.release()
+    cv2.destroyAllWindows()
+
+    label_map = {label:num for num, label in enumerate(actions)}
+
+    sequences, labels = [], []
+for action in actions:
+    for sequence in range(no_sequences+100):
+        window = []
+        for frame_num in range(sequence_length):
+            res = np.load(os.path.join(DATA_PATH, action, str(sequence), "{}.npy".format(frame_num)))
+            window.append(res)
+        sequences.append(window)
+        labels.append(label_map[action])
+
+np.array(sequences).shape
+
+X = np.array(sequences)
+y = to_categorical(labels).astype(int)
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.07)
+
+// Model //
+
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization
+from keras.callbacks import ModelCheckpoint,EarlyStopping
+
+
+model = Sequential()
+
+# Add LSTM layers with return_sequences=True for intermediate layers
+model.add(LSTM(64, return_sequences=True, activation='relu', input_shape=(30, 1629)))
+model.add(BatchNormalization())
+model.add(Dropout(0.2))
+
+model.add(LSTM(64, return_sequences=True, activation='relu'))
+model.add(BatchNormalization())
+model.add(Dropout(0.2))
+
+# Last LSTM layer with return_sequences=False
+model.add(LSTM(64, activation='relu'))
+model.add(BatchNormalization())
+model.add(Dropout(0.2))
+
+# Add Dense layers
+model.add(Dense(128, activation='relu'))
+model.add(BatchNormalization())
+model.add(Dropout(0.2))
+
+model.add(Dense(64, activation='relu'))
+model.add(BatchNormalization())
+model.add(Dropout(0.2))
+
+# Output layer
+model.add(Dense(actions.shape[0], activation='softmax'))
+
+model.compile(optimizer='Adam', loss='categorical_crossentropy', metrics=['categorical_accuracy'])
+
+model.summary()
+
+// Training //
+
+filepath = 'model.keras'
+checkpoint = ModelCheckpoint(filepath=filepath,monitor='loss',verbose=1,save_best_only=True,mode='min')
+ES = EarlyStopping(monitor='loss', patience=100)
+
+import tensorflow as tf
+
+history=model.fit(X_train, y_train, epochs=20, callbacks = [checkpoint,ES])
+
+import matplotlib.pyplot as plt
+
+model = tf.keras.models.load_model('model.keras')
+
+plt.plot(history.history['loss'])
+plt.plot(history.history['categorical_accuracy'])
+plt.title('Training accuracy and loss')
+plt.xlabel('epoch')
+plt.legend(['Loss', 'Accuracy'], loc='upper left')
+plt.show()
+
+//Model Evaluvation//
+
+import tensorflow as tf
+
+from sklearn.metrics import confusion_matrix, accuracy_score,precision_score,recall_score,f1_score,ConfusionMatrixDisplay
+import seaborn as sns
+
+model = tf.keras.models.load_model('model.keras')
+
+yhat = model.predict(X_test)
+ytrue = np.argmax(y_test, axis=1).tolist()
+yhat = np.argmax(yhat, axis=1).tolist()
+#m=multilabel_confusion_matrix(ytrue, yhat)
+a=accuracy_score(ytrue, yhat)
+p=precision_score(ytrue, yhat, average='weighted')
+r=recall_score(ytrue, yhat,average='weighted')
+f=f1_score(ytrue, yhat, average='weighted')
+
+print("accuracy: ",a)
+print("Precision:",p)
+print("recall:",r)
+print("f1-Score",f)
+
+cm = confusion_matrix(ytrue, yhat)
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
+disp.plot()
+plt.title("Confusion matrix")
+plt.show()
+
+//Live Detection//
+
+import tensorflow as tf
+
+sequence = []
+sentence = []
+threshold = 0.8
+ss=""
+cap = cv2.VideoCapture(0)
+with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5) as holistic:
+    while cap.isOpened():
+        #ss=""
+        ret, frame = cap.read()
+
+        image, results = mediapipe_detection(frame, holistic)
+        #print(results)
+        
+        draw_styled_landmarks(image, results)
+        keypoints = extract_keypoints(results)
+        if results.left_hand_landmarks ==None and results.right_hand_landmarks ==None:
+            sequence=[]
+        else:
+            sequence.append(keypoints)
+            sequence = sequence[-30:]
+        
+        if len(sequence) == 30:
+           
+            res = model.predict(np.expand_dims(sequence, axis=0),verbose=0)[0]
+            if res[np.argmax(res)] > threshold: 
+                if len(sentence) > 0: 
+                    if actions[np.argmax(res)] != sentence[-1]:
+                        sentence.append(actions[np.argmax(res)])
+                        ss+=" "+actions[np.argmax(res)]
+                else:
+                    sentence.append(actions[np.argmax(res)])
+                    ss+=" "+actions[np.argmax(res)]
+
+            if len(sentence) > 5: 
+                sentence = sentence[-5:]
+            sequence=[] 
+        cv2.putText(image, ss, (20,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2, cv2.LINE_AA)
+        
+        cv2.imshow('Output', image)
+
+        if cv2.waitKey(10) & 0xFF == ord('q'):
+            break
+    cap.release()
+    cv2.destroyAllWindows()
